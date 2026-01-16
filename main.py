@@ -102,15 +102,53 @@ def get_default_stage() -> str:
     return os.environ.get("MCP_STAGE", "TEST")
 
 @mcp.tool()
-def whoami() -> str:
-    """Muestra información del usuario autenticado actual"""
+async def whoami() -> str:
+    """Muestra información del usuario autenticado actual y valida acceso Rimac"""
     token: AccessToken | None = get_access_token()
     
     if token is None:
         return "No authenticated user"
     
-    # Mostrar TODOS los claims para debug
-    return f"Token claims: {token.claims}"
+    user_id = token.claims.get("sub")
+    github_login = token.claims.get("login") or token.claims.get("preferred_username")
+    email_from_claims = token.claims.get("email")
+    
+    result = f"User ID: {user_id}\n"
+    result += f"GitHub Username: {github_login}\n"
+    result += f"Email from claims: {email_from_claims or 'Not in token'}\n\n"
+    
+    # Intentar obtener email público de GitHub
+    if github_login:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"https://api.github.com/users/{github_login}",
+                    headers={"Accept": "application/vnd.github.v3+json"},
+                )
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    public_email = user_data.get("email")
+                    result += f"Email público en GitHub: {public_email or 'No public (https://github.com/settings/profile)'}\n\n"
+                    
+                    # Validar si es Rimac
+                    email_to_check = public_email or email_from_claims
+                    if email_to_check:
+                        if email_to_check.endswith("@rimac.com.pe"):
+                            result += "✅ ACCESO AUTORIZADO - Email @rimac.com.pe detectado"
+                        else:
+                            result += f"❌ ACCESO DENEGADO - Email '{email_to_check}' no es @rimac.com.pe"
+                    else:
+                        result += "⚠️  No se pudo verificar email. Configura tu email público en GitHub."
+                else:
+                    result += f"⚠️  Error consultando GitHub API: {response.status_code}"
+        except Exception as e:
+            result += f"⚠️  Error: {str(e)}"
+    else:
+        result += "⚠️  No se pudo obtener username de GitHub"
+    
+    result += f"\n\nToken claims completos: {token.claims}"
+    return result
 
 @mcp.prompt("analyze-serverless-project")
 def analyze_serverless_project_prompt() -> str:
