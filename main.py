@@ -11,12 +11,12 @@ from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
 
-# Crear el provider de GitHub
+# Crear el provider de GitHub con configuración explícita de scopes
 auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
     client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
-    required_scopes=["user:email"],
+    scopes=["user:email"],  # Scopes que el servidor solicitará
 )
 
 # Middleware para validar dominio de email
