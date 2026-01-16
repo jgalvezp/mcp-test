@@ -11,27 +11,6 @@ from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
 
-# Middleware para auditoría
-class AuditMiddleware(Middleware):
-    """Middleware para auditoría - registra quién ejecuta cada tool"""
-    
-    async def on_call_tool(self, context: MiddlewareContext, call_next):
-        # El token ya fue validado por RimacTokenVerifier
-        token: AccessToken | None = get_access_token()
-        
-        if token:
-            email = token.claims.get("email", "unknown")
-            print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
-        
-        # Continuar con la ejecución del tool
-        return await call_next(context)
-
-# OAuth 2.1 con GitHub personalizado
-# GitHub OAuth ya implementa las mejores prácticas de OAuth 2.1:
-# - PKCE (Proof Key for Code Exchange) para flujos de autorización
-# - State parameter obligatorio para prevenir CSRF
-# - Refresh token rotation
-
 # Crear el provider de GitHub
 auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
@@ -40,80 +19,51 @@ auth = GitHubProvider(
     required_scopes=["user:email"],
 )
 
-# Hook personalizado para validar el email después de la autorización
-original_exchange_code = auth.exchange_code_for_token
-
-async def custom_exchange_code(code: str, code_verifier: str, redirect_uri: str):
-    """Exchange code y valida que el usuario tenga email @rimac.com.pe"""
-    print("[DEBUG] Intercambiando código por token...")
+# Middleware para validar dominio de email
+class RimacAuthMiddleware(Middleware):
+    """Middleware que valida que el usuario tenga email @rimac.com.pe"""
     
-    # Obtener el token original de GitHub
-    token_response = await original_exchange_code(code, code_verifier, redirect_uri)
+    ALLOWED_DOMAIN = "@rimac.com.pe"
+    _validated_users = set()  # Cache de usuarios ya validados
     
-    if not token_response:
-        print("[DEBUG] No se pudo obtener token")
-        return None
-    
-    access_token = token_response.get("access_token")
-    print(f"[DEBUG] Token de GitHub obtenido")
-    
-    # Obtener el email del usuario desde GitHub
-    async with httpx.AsyncClient() as client:
-        # Primero obtener info del usuario
-        user_response = await client.get(
-            "https://api.github.com/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/vnd.github.v3+json",
-            },
-        )
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        token: AccessToken | None = get_access_token()
         
-        if user_response.status_code != 200:
-            print(f"[DEBUG] Error obteniendo usuario: {user_response.status_code}")
-            return None
+        if not token:
+            print("[DEBUG] No hay token")
+            raise Exception("Authentication required")
         
-        user_data = user_response.json()
-        email = user_data.get("email")
-        print(f"[DEBUG] Email público del usuario: {email}")
+        email = token.claims.get("email")
+        user_id = token.claims.get("sub")
         
-        # Si no hay email público, obtener de la lista de emails
+        # Si ya validamos este usuario, continuar
+        if user_id in self._validated_users:
+            print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
+            return await call_next(context)
+        
+        print(f"[DEBUG] Validando usuario... Claims: {token.claims}")
+        
+        # Si no hay email en claims, intentar obtenerlo de GitHub
         if not email:
-            emails_response = await client.get(
-                "https://api.github.com/user/emails",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
-            )
-            
-            if emails_response.status_code == 200:
-                emails = emails_response.json()
-                print(f"[DEBUG] Emails del usuario: {emails}")
-                for email_data in emails:
-                    if email_data.get("primary") and email_data.get("verified"):
-                        email = email_data["email"]
-                        break
-        
-        print(f"[DEBUG] Email final: {email}")
+            # Necesitamos el access token de GitHub original
+            # FastMCP almacena los tokens, intentar obtenerlo
+            print("[DEBUG] No hay email en claims, usuario no autorizado")
+            raise Exception("Email not available. Please re-authenticate with user:email scope.")
         
         # Validar el dominio
-        if not email or not email.endswith("@rimac.com.pe"):
-            print(f"[DEBUG] RECHAZADO - Email '{email}' no es de @rimac.com.pe")
-            return None
+        if not email.endswith(self.ALLOWED_DOMAIN):
+            print(f"[DEBUG] RECHAZADO - Email {email} no es de {self.ALLOWED_DOMAIN}")
+            raise Exception(f"Access denied. Only users with {self.ALLOWED_DOMAIN} email addresses are allowed.")
         
         print(f"[DEBUG] ✓ Usuario autorizado: {email}")
+        self._validated_users.add(user_id)
+        print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
         
-        # Agregar el email al response para que quede en los claims
-        token_response["email"] = email
-        
-    return token_response
-
-# Reemplazar el método de exchange
-auth.exchange_code_for_token = custom_exchange_code
+        return await call_next(context)
 
 # Inicializar el servidor MCP con middleware
 mcp = FastMCP("migration-mcp", auth=auth)
-mcp.add_middleware(AuditMiddleware())
+mcp.add_middleware(RimacAuthMiddleware())
 
 # Helper para obtener stage por defecto
 def get_default_stage() -> str:
