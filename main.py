@@ -22,17 +22,24 @@ class RimacTokenVerifier(GitHubTokenVerifier):
     
     async def verify_token(self, token: str) -> AccessToken | None:
         """Verifica el token y valida el dominio del email"""
+        print(f"[DEBUG] Verificando token...")
+        
         # Primero verificar el token con GitHub
         access_token = await super().verify_token(token)
         
         if not access_token:
+            print(f"[DEBUG] Token inválido - super().verify_token retornó None")
             return None
+        
+        print(f"[DEBUG] Token válido. Claims: {access_token.claims}")
         
         # Validar el dominio del email
         email = access_token.claims.get("email")
+        print(f"[DEBUG] Email en claims: {email}")
         
         if not email:
             # Si no hay email en el token, intentar obtenerlo de la API de GitHub
+            print(f"[DEBUG] No hay email en claims, consultando API de GitHub...")
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     "https://api.github.com/user/emails",
@@ -43,23 +50,30 @@ class RimacTokenVerifier(GitHubTokenVerifier):
                     },
                 )
                 
+                print(f"[DEBUG] API GitHub status: {response.status_code}")
+                
                 if response.status_code == 200:
                     emails = response.json()
+                    print(f"[DEBUG] Emails obtenidos: {emails}")
                     # Buscar el email primario y verificado
                     for email_data in emails:
                         if email_data.get("primary") and email_data.get("verified"):
                             email = email_data["email"]
                             access_token.claims["email"] = email
+                            print(f"[DEBUG] Email primario encontrado: {email}")
                             break
         
         # Si aún no hay email, rechazar
         if not email:
+            print(f"[DEBUG] RECHAZADO - No se pudo obtener email")
             return None
         
         # Validar el dominio
         if not email.endswith(self.ALLOWED_DOMAIN):
+            print(f"[DEBUG] RECHAZADO - Email {email} no termina en {self.ALLOWED_DOMAIN}")
             return None
         
+        print(f"[DEBUG] ✓ Usuario autorizado: {email}")
         return access_token
 
 # Middleware para logging (la validación principal está en RimacTokenVerifier)
