@@ -37,7 +37,8 @@ class RimacGitHubTokenVerifier(GitHubTokenVerifier):
             print(f"[AUTH] Token rechazado: no tiene username en claims")
             return None
         
-        # Obtener email de la API pública de GitHub (requiere email público)
+        # Consultar la API pública de GitHub para obtener el email
+        email = None
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.get(
@@ -48,31 +49,27 @@ class RimacGitHubTokenVerifier(GitHubTokenVerifier):
                     },
                 )
                 
-                if response.status_code != 200:
-                    print(f"[AUTH] Error consultando GitHub API: {response.status_code}")
-                    return None
-                
-                user_data = response.json()
-                email = user_data.get("email")
-                
-                if not email:
-                    print(f"[AUTH] Token rechazado: usuario '{github_login}' no tiene email público")
-                    print(f"[AUTH] El usuario debe configurar su email como público en https://github.com/settings/profile")
-                    return None
-                
-                if not email.endswith(self.ALLOWED_DOMAIN):
-                    print(f"[AUTH] Token rechazado: email '{email}' no es {self.ALLOWED_DOMAIN}")
-                    return None
-                
-                print(f"[AUTH] ✓ Usuario autorizado: {github_login} ({email})")
-                
-                # Agregar el email validado a los claims
-                access_token.claims["email"] = email
-                return access_token
-                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    email = user_data.get("email")
+                    print(f"[AUTH] Email público obtenido de API: {email}")
         except Exception as e:
-            print(f"[AUTH] Error verificando email: {e}")
+            print(f"[AUTH] Error consultando GitHub API: {e}")
+        
+        if not email:
+            print(f"[AUTH] Token rechazado: usuario '{github_login}' no tiene email público")
+            print(f"[AUTH] El usuario debe configurar su email como público en https://github.com/settings/profile")
             return None
+        
+        if not email.endswith(self.ALLOWED_DOMAIN):
+            print(f"[AUTH] Token rechazado: email '{email}' no es {self.ALLOWED_DOMAIN}")
+            return None
+        
+        print(f"[AUTH] ✓ Usuario autorizado: {github_login} ({email})")
+        
+        # Agregar el email validado a los claims
+        access_token.claims["email"] = email
+        return access_token
 
 # Crear el provider de GitHub con el verificador personalizado
 rimac_token_verifier = RimacGitHubTokenVerifier(
