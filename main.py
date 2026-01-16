@@ -41,23 +41,38 @@ class RimacAuthMiddleware(Middleware):
         
         print(f"[DEBUG] Validando nuevo usuario... user_id: {user_id}")
         
-        # Obtener el email usando el token OAuth del usuario
+        # Obtener el email de GitHub usando el provider
         email = None
         try:
-            # Primero intentar de los claims (puede que esté ahí)
+            # GitHubProvider almacena información del usuario
+            # Necesitamos obtener el email directamente de los claims o de GitHub
+            
+            # Intentar obtener de los claims primero
             email = token.claims.get("email")
             
-            # Si no está en claims, usar el token OAuth para llamar al endpoint autenticado
+            # Si no está en claims, necesitamos obtenerlo de otra forma
             if not email:
-                github_user_data = token.claims.get("github_user_data")
-                if github_user_data:
-                    email = github_user_data.get("email")
+                # El token tiene información de GitHub, intentar obtener el username
+                github_login = token.claims.get("login") or token.claims.get("preferred_username")
+                
+                if github_login:
+                    # Consultar la API pública de GitHub
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(
+                            f"https://api.github.com/users/{github_login}",
+                            headers={"Accept": "application/vnd.github.v3+json"},
+                        )
+                        
+                        if response.status_code == 200:
+                            user_data = response.json()
+                            email = user_data.get("email")
+                            print(f"[DEBUG] Email público obtenido: {email}")
             
             if not email:
-                print(f"[DEBUG] No se pudo obtener email de los claims. Claims: {token.claims}")
+                print(f"[DEBUG] No se pudo obtener email. Claims disponibles: {token.claims}")
                 raise Exception(
-                    f"No se pudo verificar tu email. El email no está disponible en tu perfil de GitHub. "
-                    f"Por favor asegúrate de tener un email verificado en GitHub."
+                    f"No se pudo verificar tu email. Por favor asegúrate de que tu email de GitHub sea público. "
+                    f"Ve a https://github.com/settings/profile y marca 'Public email'."
                 )
             
             # Validar el dominio

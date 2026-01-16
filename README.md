@@ -4,6 +4,27 @@ Este servidor MCP (Model Context Protocol) está diseñado para asistir en la mi
 
 Proporciona herramientas inteligentes para entender la estructura de los proyectos, resolver configuraciones complejas y validar el entorno de desarrollo.
 
+## 🔐 Autenticación y Acceso
+
+Este servidor MCP está **protegido con GitHub OAuth** y solo permite el acceso a usuarios con email **@rimac.com.pe**.
+
+### Requisitos de Configuración de GitHub
+
+**IMPORTANTE:** Para usar este servidor, debes configurar tu email como público en GitHub:
+
+1. Ve a [GitHub Settings → Profile](https://github.com/settings/profile)
+2. En la sección **"Public email"**, selecciona tu email @rimac.com.pe
+3. Guarda los cambios
+
+**¿Por qué es necesario?** GitHub solo comparte tu email con aplicaciones OAuth si es público. Esto es una limitación de seguridad de GitHub, no del servidor MCP.
+
+### Flujo de Autenticación
+
+1. La primera vez que te conectes, se abrirá una ventana de autenticación de GitHub
+2. Autoriza la aplicación
+3. El servidor validará que tu email sea @rimac.com.pe
+4. Si es válido, podrás usar todas las herramientas del MCP
+
 ## Características Principales
 
 ### 🔍 Análisis Profundo de Serverless
