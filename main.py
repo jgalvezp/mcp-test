@@ -93,7 +93,7 @@ auth = OAuthProxy(
 )
 
 # Inicializar el servidor MCP (sin middleware, la validación es en OAuth)
-mcp = FastMCP("migration-mcp", auth=auth)
+mcp = FastMCP("migration-mcp-v2", auth=auth)  # Cambié el nombre para forzar nuevo registro
 
 # Helper para obtener stage por defecto
 def get_default_stage() -> str:
