@@ -11,57 +11,85 @@ from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
 
-# Crear el provider de GitHub con scopes requeridos y redirect URIs permitidos
+# Crear el provider de GitHub - configuración simple, sin requerir scopes
 auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
     client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
-    required_scopes=["user:email"],
-    allowed_client_redirect_uris=[
-        "http://127.0.0.1:33418/",
-        "https://vscode.dev/redirect",
-    ],
 )
 
-# Middleware para validar dominio de email
+# Middleware para validar dominio de email consultando a GitHub
 class RimacAuthMiddleware(Middleware):
     """Middleware que valida que el usuario tenga email @rimac.com.pe"""
     
     ALLOWED_DOMAIN = "@rimac.com.pe"
-    _validated_users = set()  # Cache de usuarios ya validados
+    _validated_users: Dict[str, str] = {}  # user_id -> email
     
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         token: AccessToken | None = get_access_token()
         
         if not token:
-            print("[DEBUG] No hay token")
             raise Exception("Authentication required")
         
-        email = token.claims.get("email")
         user_id = token.claims.get("sub")
         
         # Si ya validamos este usuario, continuar
         if user_id in self._validated_users:
+            email = self._validated_users[user_id]
             print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
             return await call_next(context)
         
-        print(f"[DEBUG] Validando usuario... Claims: {token.claims}")
+        print(f"[DEBUG] Validando nuevo usuario... user_id: {user_id}")
         
-        # Si no hay email en claims, intentar obtenerlo de GitHub
-        if not email:
-            # Necesitamos el access token de GitHub original
-            # FastMCP almacena los tokens, intentar obtenerlo
-            print("[DEBUG] No hay email en claims, usuario no autorizado")
-            raise Exception("Email not available. Please re-authenticate with user:email scope.")
-        
-        # Validar el dominio
-        if not email.endswith(self.ALLOWED_DOMAIN):
-            print(f"[DEBUG] RECHAZADO - Email {email} no es de {self.ALLOWED_DOMAIN}")
-            raise Exception(f"Access denied. Only users with {self.ALLOWED_DOMAIN} email addresses are allowed.")
-        
-        print(f"[DEBUG] ✓ Usuario autorizado: {email}")
-        self._validated_users.add(user_id)
-        print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
+        # Obtener el email de GitHub usando el provider
+        email = None
+        try:
+            # GitHubProvider almacena información del usuario
+            # Necesitamos obtener el email directamente de los claims o de GitHub
+            
+            # Intentar obtener de los claims primero
+            email = token.claims.get("email")
+            
+            # Si no está en claims, necesitamos obtenerlo de otra forma
+            if not email:
+                # El token tiene información de GitHub, intentar obtener el username
+                github_login = token.claims.get("login") or token.claims.get("preferred_username")
+                
+                if github_login:
+                    # Consultar la API pública de GitHub
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(
+                            f"https://api.github.com/users/{github_login}",
+                            headers={"Accept": "application/vnd.github.v3+json"},
+                        )
+                        
+                        if response.status_code == 200:
+                            user_data = response.json()
+                            email = user_data.get("email")
+                            print(f"[DEBUG] Email público obtenido: {email}")
+            
+            if not email:
+                print(f"[DEBUG] No se pudo obtener email. Claims disponibles: {token.claims}")
+                raise Exception(
+                    f"No se pudo verificar tu email. Por favor asegúrate de que tu email de GitHub sea público. "
+                    f"Ve a https://github.com/settings/profile y marca 'Public email'."
+                )
+            
+            # Validar el dominio
+            if not email.endswith(self.ALLOWED_DOMAIN):
+                print(f"[DEBUG] RECHAZADO - Email {email} no es de {self.ALLOWED_DOMAIN}")
+                raise Exception(
+                    f"Acceso denegado. Solo usuarios con email {self.ALLOWED_DOMAIN} pueden usar este servidor. "
+                    f"Tu email: {email}"
+                )
+            
+            print(f"[DEBUG] ✓ Usuario autorizado: {email}")
+            self._validated_users[user_id] = email
+            print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
+            
+        except Exception as e:
+            print(f"[ERROR] Validación falló: {e}")
+            raise
         
         return await call_next(context)
 
