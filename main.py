@@ -76,7 +76,7 @@ class RimacGitHubTokenVerifier(GitHubTokenVerifier):
 
 # Crear el provider de GitHub con el verificador personalizado
 rimac_token_verifier = RimacGitHubTokenVerifier(
-    required_scopes=["user", "read:org"],  # read:org necesario para ver orgs privadas
+    required_scopes=["user"],  # Solo user, sin read:org
     timeout_seconds=10
 )
 
