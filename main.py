@@ -22,7 +22,7 @@ class RimacGitHubTokenVerifier(GitHubTokenVerifier):
     el usuario no puede conectarse al servidor MCP.
     """
     
-    ALLOWED_DOMAIN = "@rimac.com.pe"
+    ALLOWED_DOMAIN = "@rimac.com"
     
     async def verify_token(self, token: str) -> AccessToken | None:
         # Llamar al verificador base de GitHub para obtener info del usuario
