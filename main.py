@@ -10,13 +10,22 @@ from typing import Dict, Any, Optional
 from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
+from fastmcp.server.auth.oauth import InMemoryKeyValue
 
-# Crear el provider de GitHub con scopes requeridos
+# Crear storage para clientes pre-registrados
+client_storage = InMemoryKeyValue()
+
+# Crear el provider de GitHub con registro dinámico deshabilitado
 auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
     client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
     required_scopes=["user:email"],
+    client_storage=client_storage,
+    allowed_client_redirect_uris=[
+        "http://127.0.0.1:33418/",
+        "https://vscode.dev/redirect",
+    ],
 )
 
 # Middleware para validar dominio de email
