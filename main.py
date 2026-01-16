@@ -36,7 +36,7 @@ class RimacAuthMiddleware(Middleware):
         # Si ya validamos este usuario, continuar
         if user_id in self._validated_users:
             email = self._validated_users[user_id]
-            print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
+            print(f"[AUDIT] User {email} calling tool")
             return await call_next(context)
         
         print(f"[DEBUG] Validando nuevo usuario... user_id: {user_id}")
@@ -85,7 +85,7 @@ class RimacAuthMiddleware(Middleware):
             
             print(f"[DEBUG] ✓ Usuario autorizado: {email}")
             self._validated_users[user_id] = email
-            print(f"[AUDIT] User {email} calling tool: {context.tool_name}")
+            print(f"[AUDIT] User {email} autorizado")
             
         except Exception as e:
             print(f"[ERROR] Validación falló: {e}")
