@@ -88,6 +88,7 @@ auth = OAuthProxy(
     token_verifier=rimac_token_verifier,
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
     redirect_path="/auth/callback",
+    valid_scopes=["user", "read:org"],  # Permitir que el cliente solicite estos scopes
     # jwt_signing_key es opcional - si no se provee, usa client_secret
 )
 
