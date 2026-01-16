@@ -10,73 +10,8 @@ from typing import Dict, Any, Optional
 from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
-from fastmcp.server.auth import TokenVerifier
-from fastmcp.server.auth.auth import AccessToken
-from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 
-# Custom token verifier que valida el dominio del email
-class RimacTokenVerifier(GitHubTokenVerifier):
-    """Token verifier que valida que el email sea de @rimac.com.pe"""
-    
-    ALLOWED_DOMAIN = "@rimac.com.pe"
-    
-    async def verify_token(self, token: str) -> AccessToken | None:
-        """Verifica el token y valida el dominio del email"""
-        print(f"[DEBUG] Verificando token...")
-        
-        # Primero verificar el token con GitHub
-        access_token = await super().verify_token(token)
-        
-        if not access_token:
-            print(f"[DEBUG] Token inválido - super().verify_token retornó None")
-            return None
-        
-        print(f"[DEBUG] Token válido. Claims: {access_token.claims}")
-        
-        # Validar el dominio del email
-        email = access_token.claims.get("email")
-        print(f"[DEBUG] Email en claims: {email}")
-        
-        if not email:
-            # Si no hay email en el token, intentar obtenerlo de la API de GitHub
-            print(f"[DEBUG] No hay email en claims, consultando API de GitHub...")
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    "https://api.github.com/user/emails",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/vnd.github.v3+json",
-                        "User-Agent": "FastMCP-Rimac-OAuth",
-                    },
-                )
-                
-                print(f"[DEBUG] API GitHub status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    emails = response.json()
-                    print(f"[DEBUG] Emails obtenidos: {emails}")
-                    # Buscar el email primario y verificado
-                    for email_data in emails:
-                        if email_data.get("primary") and email_data.get("verified"):
-                            email = email_data["email"]
-                            access_token.claims["email"] = email
-                            print(f"[DEBUG] Email primario encontrado: {email}")
-                            break
-        
-        # Si aún no hay email, rechazar
-        if not email:
-            print(f"[DEBUG] RECHAZADO - No se pudo obtener email")
-            return None
-        
-        # Validar el dominio
-        if not email.endswith(self.ALLOWED_DOMAIN):
-            print(f"[DEBUG] RECHAZADO - Email {email} no termina en {self.ALLOWED_DOMAIN}")
-            return None
-        
-        print(f"[DEBUG] ✓ Usuario autorizado: {email}")
-        return access_token
-
-# Middleware para logging (la validación principal está en RimacTokenVerifier)
+# Middleware para auditoría
 class AuditMiddleware(Middleware):
     """Middleware para auditoría - registra quién ejecuta cada tool"""
     
@@ -97,21 +32,84 @@ class AuditMiddleware(Middleware):
 # - State parameter obligatorio para prevenir CSRF
 # - Refresh token rotation
 
-# Crear el custom token verifier que valida @rimac.com.pe
-custom_verifier = RimacTokenVerifier(
-    required_scopes=["user:email"],  # Requerir scope de email
-    timeout_seconds=10
-)
-
-# Crear el provider de GitHub con el custom verifier
+# Crear el provider de GitHub
 auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
     client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
+    required_scopes=["user:email"],
 )
 
-# Reemplazar el token validator por defecto con nuestro custom verifier
-auth._token_validator = custom_verifier
+# Hook personalizado para validar el email después de la autorización
+original_exchange_code = auth.exchange_code_for_token
+
+async def custom_exchange_code(code: str, code_verifier: str, redirect_uri: str):
+    """Exchange code y valida que el usuario tenga email @rimac.com.pe"""
+    print("[DEBUG] Intercambiando código por token...")
+    
+    # Obtener el token original de GitHub
+    token_response = await original_exchange_code(code, code_verifier, redirect_uri)
+    
+    if not token_response:
+        print("[DEBUG] No se pudo obtener token")
+        return None
+    
+    access_token = token_response.get("access_token")
+    print(f"[DEBUG] Token de GitHub obtenido")
+    
+    # Obtener el email del usuario desde GitHub
+    async with httpx.AsyncClient() as client:
+        # Primero obtener info del usuario
+        user_response = await client.get(
+            "https://api.github.com/user",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        )
+        
+        if user_response.status_code != 200:
+            print(f"[DEBUG] Error obteniendo usuario: {user_response.status_code}")
+            return None
+        
+        user_data = user_response.json()
+        email = user_data.get("email")
+        print(f"[DEBUG] Email público del usuario: {email}")
+        
+        # Si no hay email público, obtener de la lista de emails
+        if not email:
+            emails_response = await client.get(
+                "https://api.github.com/user/emails",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+            )
+            
+            if emails_response.status_code == 200:
+                emails = emails_response.json()
+                print(f"[DEBUG] Emails del usuario: {emails}")
+                for email_data in emails:
+                    if email_data.get("primary") and email_data.get("verified"):
+                        email = email_data["email"]
+                        break
+        
+        print(f"[DEBUG] Email final: {email}")
+        
+        # Validar el dominio
+        if not email or not email.endswith("@rimac.com.pe"):
+            print(f"[DEBUG] RECHAZADO - Email '{email}' no es de @rimac.com.pe")
+            return None
+        
+        print(f"[DEBUG] ✓ Usuario autorizado: {email}")
+        
+        # Agregar el email al response para que quede en los claims
+        token_response["email"] = email
+        
+    return token_response
+
+# Reemplazar el método de exchange
+auth.exchange_code_for_token = custom_exchange_code
 
 # Inicializar el servidor MCP con middleware
 mcp = FastMCP("migration-mcp", auth=auth)
