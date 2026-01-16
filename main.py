@@ -1,8 +1,7 @@
 from fastmcp import FastMCP, Context
-from fastmcp.server.auth.providers.github import GitHubTokenVerifier
-from fastmcp.server.auth.oauth_proxy import OAuthProxy
-from fastmcp.server.auth.auth import AccessToken
-from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.server.dependencies import get_access_token, AccessToken
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 import yaml
 import os
 import httpx
@@ -12,88 +11,91 @@ from utils.validation import validate_dependencies
 from utils.serverless import execute_serverless_print, extract_yaml_from_output, persist_resolved_config
 from utils.analysis import search_database_references
 
-# TokenVerifier personalizado que valida membresía en la organización Rimac-Seguros
-class RimacGitHubTokenVerifier(GitHubTokenVerifier):
-    """
-    Token verifier que valida que el usuario pertenezca a la organización 
-    'Rimac-Seguros' en GitHub DURANTE el proceso de autenticación OAuth.
-    
-    Si el usuario no es miembro de la organización, el token se rechaza y 
-    no puede conectarse al servidor MCP.
-    
-    VENTAJAS sobre validar email:
-    - No requiere que el email sea público en GitHub
-    - Control centralizado: remover de la org = perder acceso
-    - Más seguro y fácil de administrar
-    """
-    
-    REQUIRED_ORG = "Rimac-Seguros"
-    
-    async def verify_token(self, token: str) -> AccessToken | None:
-        # Llamar al verificador base de GitHub para obtener info del usuario
-        access_token = await super().verify_token(token)
-        
-        if access_token is None:
-            return None
-        
-        github_login = access_token.claims.get("login")
-        
-        if not github_login:
-            print(f"[AUTH] Token rechazado: no tiene username en claims")
-            return None
-        
-        # Verificar membresía en la organización usando el token del usuario
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                # Usar el token del usuario para consultar SUS organizaciones
-                response = await client.get(
-                    "https://api.github.com/user/orgs",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/vnd.github.v3+json",
-                        "User-Agent": "FastMCP-Rimac-Auth",
-                    },
-                )
-                
-                if response.status_code != 200:
-                    print(f"[AUTH] Error consultando orgs: {response.status_code}")
-                    return None
-                
-                orgs = response.json()
-                org_logins = [org.get("login") for org in orgs]
-                
-                if self.REQUIRED_ORG not in org_logins:
-                    print(f"[AUTH] Token rechazado: usuario '{github_login}' no pertenece a {self.REQUIRED_ORG}")
-                    print(f"[AUTH] Organizaciones del usuario: {org_logins}")
-                    return None
-                
-                print(f"[AUTH] ✓ Usuario autorizado: {github_login} (miembro de {self.REQUIRED_ORG})")
-                return access_token
-                
-        except Exception as e:
-            print(f"[AUTH] Error verificando membresía: {e}")
-            return None
-
-# Crear el provider de GitHub con el verificador personalizado
-rimac_token_verifier = RimacGitHubTokenVerifier(
-    required_scopes=["user"],  # Solo user, sin read:org
-    timeout_seconds=10
-)
-
-auth = OAuthProxy(
-    upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
-    upstream_token_endpoint="https://github.com/login/oauth/access_token",
-    upstream_client_id=os.environ["GITHUB_CLIENT_ID"],
-    upstream_client_secret=os.environ["GITHUB_CLIENT_SECRET"],
-    token_verifier=rimac_token_verifier,
+# Crear el provider de GitHub - configuración simple, sin requerir scopes
+auth = GitHubProvider(
+    client_id=os.environ["GITHUB_CLIENT_ID"],
+    client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=os.environ.get("MCP_BASE_URL", "http://localhost:8000"),
-    redirect_path="/auth/callback",
-    valid_scopes=["user", "read:org"],  # Permitir que el cliente solicite estos scopes
-    # jwt_signing_key es opcional - si no se provee, usa client_secret
 )
 
-# Inicializar el servidor MCP (sin middleware, la validación es en OAuth)
-mcp = FastMCP("migration-mcp-v3", auth=auth)  # Cambié el nombre para forzar nuevo registro
+# Middleware para validar dominio de email consultando a GitHub
+class RimacAuthMiddleware(Middleware):
+    """Middleware que valida que el usuario tenga email @rimac.com.pe"""
+    
+    ALLOWED_DOMAIN = "@rimac.com.pe"
+    _validated_users: Dict[str, str] = {}  # user_id -> email
+    
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        token: AccessToken | None = get_access_token()
+        
+        if not token:
+            raise Exception("Authentication required")
+        
+        user_id = token.claims.get("sub")
+        
+        # Si ya validamos este usuario, continuar
+        if user_id in self._validated_users:
+            email = self._validated_users[user_id]
+            print(f"[AUDIT] User {email} calling tool")
+            return await call_next(context)
+        
+        print(f"[DEBUG] Validando nuevo usuario... user_id: {user_id}")
+        
+        # Obtener el email de GitHub usando el provider
+        email = None
+        try:
+            # GitHubProvider almacena información del usuario
+            # Necesitamos obtener el email directamente de los claims o de GitHub
+            
+            # Intentar obtener de los claims primero
+            email = token.claims.get("email")
+            
+            # Si no está en claims, necesitamos obtenerlo de otra forma
+            if not email:
+                # El token tiene información de GitHub, intentar obtener el username
+                github_login = token.claims.get("login") or token.claims.get("preferred_username")
+                
+                if github_login:
+                    # Consultar la API pública de GitHub
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(
+                            f"https://api.github.com/users/{github_login}",
+                            headers={"Accept": "application/vnd.github.v3+json"},
+                        )
+                        
+                        if response.status_code == 200:
+                            user_data = response.json()
+                            email = user_data.get("email")
+                            print(f"[DEBUG] Email público obtenido: {email}")
+            
+            if not email:
+                print(f"[DEBUG] No se pudo obtener email. Claims disponibles: {token.claims}")
+                raise Exception(
+                    f"No se pudo verificar tu email. Por favor asegúrate de que tu email de GitHub sea público. "
+                    f"Ve a https://github.com/settings/profile y marca 'Public email'."
+                )
+            
+            # Validar el dominio
+            if not email.endswith(self.ALLOWED_DOMAIN):
+                print(f"[DEBUG] RECHAZADO - Email {email} no es de {self.ALLOWED_DOMAIN}")
+                raise Exception(
+                    f"Acceso denegado. Solo usuarios con email {self.ALLOWED_DOMAIN} pueden usar este servidor. "
+                    f"Tu email: {email}"
+                )
+            
+            print(f"[DEBUG] ✓ Usuario autorizado: {email}")
+            self._validated_users[user_id] = email
+            print(f"[AUDIT] User {email} autorizado")
+            
+        except Exception as e:
+            print(f"[ERROR] Validación falló: {e}")
+            raise
+        
+        return await call_next(context)
+
+# Inicializar el servidor MCP con middleware
+mcp = FastMCP("migration-mcp-v1", auth=auth)
+mcp.add_middleware(RimacAuthMiddleware())
 
 # Helper para obtener stage por defecto
 def get_default_stage() -> str:
@@ -101,7 +103,7 @@ def get_default_stage() -> str:
 
 @mcp.tool()
 async def whoami() -> str:
-    """Muestra información del usuario autenticado actual y membresía en Rimac-Seguros"""
+    """Muestra información del usuario autenticado actual y valida acceso Rimac"""
     token: AccessToken | None = get_access_token()
     
     if token is None:
@@ -115,24 +117,35 @@ async def whoami() -> str:
     result += f"GitHub Username: {github_login}\n"
     result += f"Email from claims: {email_from_claims or 'Not in token'}\n\n"
     
-    # Obtener organizaciones del usuario usando su token
+    # Intentar obtener email público de GitHub
     if github_login:
         try:
-            # Obtener el token OAuth del usuario (el token en AccessToken es el FastMCP JWT)
-            # Necesitamos el token original de GitHub
-            github_user_data = token.claims.get("github_user_data", {})
-            
-            result += f"GitHub User Data: {github_user_data.get('name') or 'N/A'}\n"
-            result += f"Email: {github_user_data.get('email') or email_from_claims or 'No disponible'}\n\n"
-            
-            result += "✅ ACCESO AUTORIZADO - Usuario autenticado correctamente\n"
-            result += f"✓ Miembro de la organización: Rimac-Seguros\n"
-            result += f"   (La validación se realizó durante el OAuth - si estás viendo esto, eres miembro)\n"
-            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"https://api.github.com/users/{github_login}",
+                    headers={"Accept": "application/vnd.github.v3+json"},
+                )
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    public_email = user_data.get("email")
+                    result += f"Email público en GitHub: {public_email or 'No public (https://github.com/settings/profile)'}\n\n"
+                    
+                    # Validar si es Rimac
+                    email_to_check = public_email or email_from_claims
+                    if email_to_check:
+                        if email_to_check.endswith("@rimac.com.pe"):
+                            result += "✅ ACCESO AUTORIZADO - Email @rimac.com.pe detectado"
+                        else:
+                            result += f"❌ ACCESO DENEGADO - Email '{email_to_check}' no es @rimac.com.pe"
+                    else:
+                        result += "⚠️  No se pudo verificar email. Configura tu email público en GitHub."
+                else:
+                    result += f"⚠️  Error consultando GitHub API: {response.status_code}"
         except Exception as e:
-            result += f"⚠️  Error: {str(e)}\n"
+            result += f"⚠️  Error: {str(e)}"
     else:
-        result += "⚠️  No se pudo obtener username de GitHub\n"
+        result += "⚠️  No se pudo obtener username de GitHub"
     
     result += f"\n\nToken claims completos: {token.claims}"
     return result
